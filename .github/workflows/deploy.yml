@@ -4,26 +4,27 @@ on:
   push:
     branches:
       - main
+      - qa  # Added QA branch trigger
 
   workflow_dispatch:
 
 env:
   AWS_REGION: eu-north-1
-  ECR_REPOSITORY: ecr-demo-repository1
+  ECR_REPOSITORY: ecr-demo-docker
 
 jobs:
-  build-and-deploy:
-
+  # ==========================================
+  # DEV DEPLOYMENT (Runs only on 'main' branch)
+  # ==========================================
+  deploy-dev:
+    name: Deploy to Dev
+    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
 
     steps:
-
-      # 1. Checkout source code
       - name: Checkout code
         uses: actions/checkout@v4
 
-
-      # 2. Configure AWS credentials
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -31,213 +32,101 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-
-      # 3. Verify AWS configuration
-      - name: Verify AWS configuration
-        run: |
-          echo "================================"
-          echo "AWS Configuration"
-          echo "================================"
-          echo "AWS Region: $AWS_REGION"
-          echo "ECR Repository: $ECR_REPOSITORY"
-          echo "EC2 Availability Zone: eu-north-1a"
-
-          aws sts get-caller-identity
-
-          echo "================================"
-
-
-      # 4. Verify ECR repository
-      - name: Verify ECR repository
-        run: |
-          echo "Checking ECR repository..."
-
-          aws ecr describe-repositories \
-            --repository-names "$ECR_REPOSITORY" \
-            --region "$AWS_REGION"
-
-          echo "ECR repository exists."
-
-
-      # 5. Login to Amazon ECR
       - name: Login to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-
-      # 6. Build Docker image
-      - name: Build Docker image
+      - name: Build and Push Docker image
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
         run: |
-
-          echo "================================"
-          echo "Building Docker Image"
-          echo "================================"
-
-          echo "Registry: $ECR_REGISTRY"
-          echo "Repository: $ECR_REPOSITORY"
-          echo "Image Tag: ${{ github.sha }}"
-
           docker build \
             -t "$ECR_REGISTRY/$ECR_REPOSITORY:${{ github.sha }}" \
-            -t "$ECR_REGISTRY/$ECR_REPOSITORY:latest" \
+            -t "$ECR_REGISTRY/$ECR_REPOSITORY:latest-dev" \
             .
+          docker push "$ECR_REGISTRY/$ECR_REPOSITORY:${{ github.sha }}"
+          docker push "$ECR_REGISTRY/$ECR_REPOSITORY:latest-dev"
 
-          echo "Docker image built successfully."
-
-
-      # 7. Push Docker image to ECR
-      - name: Push Docker image to ECR
-        env:
-          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-        run: |
-
-          echo "================================"
-          echo "Pushing Docker Image to ECR"
-          echo "================================"
-
-          docker push \
-            "$ECR_REGISTRY/$ECR_REPOSITORY:${{ github.sha }}"
-
-          docker push \
-            "$ECR_REGISTRY/$ECR_REPOSITORY:latest"
-
-          echo "Docker images pushed successfully."
-
-
-      # 8. Verify image in ECR
-      - name: Verify image in ECR
-        run: |
-
-          echo "================================"
-          echo "Verifying ECR Image"
-          echo "================================"
-
-          aws ecr describe-images \
-            --repository-name "$ECR_REPOSITORY" \
-            --region "$AWS_REGION" \
-            --query 'imageDetails[*].imageTags' \
-            --output table
-
-
-      # 9. Deploy image to EC2
-      - name: Deploy to EC2
+      - name: Deploy to Dev EC2
         uses: appleboy/ssh-action@v1.2.0
-
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           ECR_REPOSITORY: ${{ env.ECR_REPOSITORY }}
           IMAGE_TAG: ${{ github.sha }}
           AWS_REGION: ${{ env.AWS_REGION }}
-
         with:
-          host: ${{ secrets.EC2_HOST }}
-          username: ${{ secrets.EC2_USERNAME }}
-          key: ${{ secrets.EC2_SSH_KEY }}
-
+          host: ${{ secrets.DEV_EC2_HOST }}       # Ensure this secret is set
+          username: ${{ secrets.DEV_EC2_USERNAME }}
+          key: ${{ secrets.DEV_EC2_SSH_KEY }}
           envs: ECR_REGISTRY,ECR_REPOSITORY,IMAGE_TAG,AWS_REGION
-
           script: |
-
             set -e
-
-            echo "================================"
-            echo "Starting EC2 Deployment"
-            echo "================================"
-
-            echo "AWS Region: $AWS_REGION"
-            echo "EC2 Availability Zone: eu-north-1a"
-            echo "ECR Registry: $ECR_REGISTRY"
-            echo "ECR Repository: $ECR_REPOSITORY"
-            echo "Image Tag: $IMAGE_TAG"
-
-            echo "================================"
-            echo "Checking AWS CLI"
-            echo "================================"
-
-            aws --version
-
-            echo "================================"
-            echo "Checking Docker"
-            echo "================================"
-
-            docker --version
-
-            echo "================================"
-            echo "Logging in to Amazon ECR"
-            echo "================================"
-
-            aws ecr get-login-password \
-              --region "$AWS_REGION" | \
-              docker login \
-              --username AWS \
-              --password-stdin "$ECR_REGISTRY"
-
-            echo "ECR login successful."
-
-
-            echo "================================"
-            echo "Pulling Docker Image"
-            echo "================================"
-
-            docker pull \
-              "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
-
-            echo "Docker image pulled successfully."
-
-
-            echo "================================"
-            echo "Stopping Existing Container"
-            echo "================================"
-
-            docker stop node-app || true
-
-
-            echo "================================"
-            echo "Removing Existing Container"
-            echo "================================"
-
-            docker rm node-app || true
-
-
-            echo "================================"
-            echo "Starting New Container"
-            echo "================================"
-
+            aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "$ECR_REGISTRY"
+            docker pull "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+            docker stop node-app-dev || true
+            docker rm node-app-dev || true
             docker run -d \
-              --name node-app \
+              --name node-app-dev \
               --restart unless-stopped \
               -p 3000:3000 \
               -e ENV=DEV \
               "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
 
+  # ==========================================
+  # QA DEPLOYMENT (Runs only on 'qa' branch)
+  # ==========================================
+  deploy-qa:
+    name: Deploy to QA
+    if: github.ref == 'refs/heads/qa'
+    runs-on: ubuntu-latest
 
-            echo "================================"
-            echo "Checking Container Status"
-            echo "================================"
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-            sleep 5
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
 
-            docker ps
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
 
+      - name: Build and Push Docker image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run: |
+          docker build \
+            -t "$ECR_REGISTRY/$ECR_REPOSITORY:${{ github.sha }}" \
+            -t "$ECR_REGISTRY/$ECR_REPOSITORY:latest-qa" \
+            .
+          docker push "$ECR_REGISTRY/$ECR_REPOSITORY:${{ github.sha }}"
+          docker push "$ECR_REGISTRY/$ECR_REPOSITORY:latest-qa"
 
-            echo "================================"
-            echo "Checking Container Logs"
-            echo "================================"
-
-            docker logs --tail 50 node-app || true
-
-
-            echo "================================"
-            echo "Checking Application Health"
-            echo "================================"
-
-            sleep 5
-
-            curl -f http://localhost:3000
-
-
-            echo "================================"
-            echo "Deployment Successful"
-            echo "================================"
+      - name: Deploy to QA EC2
+        uses: appleboy/ssh-action@v1.2.0
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: ${{ env.ECR_REPOSITORY }}
+          IMAGE_TAG: ${{ github.sha }}
+          AWS_REGION: ${{ env.AWS_REGION }}
+        with:
+          host: ${{ secrets.QA_EC2_HOST }}       # Ensure this secret is set
+          username: ${{ secrets.QA_EC2_USERNAME }}
+          key: ${{ secrets.QA_EC2_SSH_KEY }}
+          envs: ECR_REGISTRY,ECR_REPOSITORY,IMAGE_TAG,AWS_REGION
+          script: |
+            set -e
+            aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "$ECR_REGISTRY"
+            docker pull "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+            docker stop node-app-qa || true
+            docker rm node-app-qa || true
+            docker run -d \
+              --name node-app-qa \
+              --restart unless-stopped \
+              -p 3000:3000 \
+              -e ENV=QA \
+              "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
